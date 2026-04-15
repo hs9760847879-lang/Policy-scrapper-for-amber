@@ -388,9 +388,36 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
     const combinedText = allChunks.join("\n\n").slice(0, 60000);
 
     const genAI = getGeminiClient();
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent(EXTRACTION_PROMPT + combinedText);
-    const responseText = result.response.text().trim();
+
+    // Try models in priority order — falls back automatically if one is unavailable
+    const MODEL_PRIORITY = [
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "gemini-2.0-flash-lite",
+    ];
+
+    let responseText = "";
+    let lastModelError: Error | null = null;
+
+    for (const modelName of MODEL_PRIORITY) {
+      try {
+        log.info({ modelName }, "Trying Gemini model");
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(EXTRACTION_PROMPT + combinedText);
+        responseText = result.response.text().trim();
+        log.info({ modelName }, "Gemini extraction succeeded");
+        break;
+      } catch (modelErr) {
+        lastModelError = modelErr instanceof Error ? modelErr : new Error(String(modelErr));
+        log.warn({ modelName, err: lastModelError.message }, "Model failed, trying next");
+      }
+    }
+
+    if (!responseText) {
+      log.error({ err: lastModelError?.message }, "All Gemini models failed");
+      res.status(500).json({ error: `AI extraction failed: ${lastModelError?.message ?? "unknown error"}` });
+      return;
+    }
 
     let policies: {
       cancellationPolicies: Record<string, string | null>;
