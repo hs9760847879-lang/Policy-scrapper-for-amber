@@ -5,10 +5,14 @@ import { ExtractPoliciesBody } from "@workspace/api-zod";
 
 const router: IRouter = Router();
 
-function getGeminiClient(): GoogleGenerativeAI {
-  const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) throw new Error("GOOGLE_API_KEY environment variable is not set");
-  return new GoogleGenerativeAI(apiKey);
+function getGeminiClients(): GoogleGenerativeAI[] {
+  const keys = [
+    process.env.GOOGLE_API_KEY,
+    process.env.GOOGLE_API_KEY_2,
+  ].filter((k): k is string => typeof k === "string" && k.trim().length > 0);
+
+  if (keys.length === 0) throw new Error("No GOOGLE_API_KEY environment variable is set");
+  return keys.map((k) => new GoogleGenerativeAI(k));
 }
 
 // ─── User Agents ─────────────────────────────────────────────────────────────
@@ -452,45 +456,67 @@ function mergeExtractions(results: ExtractedPolicies[]): ExtractedPolicies {
 
 // ─── Gemini extraction ────────────────────────────────────────────────────────
 
-const MODEL_PRIORITY = ["gemini-2.5-flash", "gemini-2.0-flash"];
+// Models in priority order — best/newest first
+const MODEL_PRIORITY = [
+  "gemini-2.5-flash",       // Gemini 2.5 Flash — primary
+  "gemini-3-flash-preview", // Gemini 3 Flash — next best
+  "gemini-2.5-flash-lite",  // Gemini 2.5 Flash Lite — lightweight fallback
+];
 
+/**
+ * Try content extraction across all (key × model) combinations.
+ * Strategy: for each model, try every key before falling to the next model.
+ * This maximises quota across both keys before degrading model quality.
+ *
+ * Attempt order (2 keys × 3 models = 6 combinations):
+ *   key1 + gemini-2.5-flash
+ *   key2 + gemini-2.5-flash
+ *   key1 + gemini-3-flash-preview
+ *   key2 + gemini-3-flash-preview
+ *   key1 + gemini-2.5-flash-lite
+ *   key2 + gemini-2.5-flash-lite
+ */
 async function callGemini(
-  genAI: GoogleGenerativeAI,
+  clients: GoogleGenerativeAI[],
   content: string,
   label: string,
   log: ReqLog
 ): Promise<ExtractedPolicies | null | "quota"> {
   let responseText = "";
   let lastErr: Error | null = null;
-  let isQuotaError = false;
+  let allQuota = true; // assume quota until we see a non-quota failure
 
+  outer:
   for (const modelName of MODEL_PRIORITY) {
-    try {
-      log.info({ modelName, label, chars: content.length }, "Calling Gemini");
-      const model = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          temperature: 0,
-          responseMimeType: "application/json",
-        },
-      });
-      const result = await model.generateContent(EXTRACTION_PROMPT + content);
-      responseText = result.response.text().trim();
-      log.info({ modelName, label }, "Gemini call succeeded");
-      isQuotaError = false;
-      break;
-    } catch (e) {
-      lastErr = e instanceof Error ? e : new Error(String(e));
-      if (lastErr.message.includes("429") || lastErr.message.includes("quota")) {
-        isQuotaError = true;
+    for (let ki = 0; ki < clients.length; ki++) {
+      try {
+        log.info({ modelName, keyIndex: ki + 1, label, chars: content.length }, "Calling Gemini");
+        const model = clients[ki].getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            temperature: 0,
+            responseMimeType: "application/json",
+          },
+        });
+        const result = await model.generateContent(EXTRACTION_PROMPT + content);
+        responseText = result.response.text().trim();
+        log.info({ modelName, keyIndex: ki + 1, label }, "Gemini call succeeded");
+        break outer; // success — stop trying
+      } catch (e) {
+        lastErr = e instanceof Error ? e : new Error(String(e));
+        const isQuota = lastErr.message.includes("429") || lastErr.message.toLowerCase().includes("quota");
+        if (!isQuota) allQuota = false;
+        log.warn(
+          { modelName, keyIndex: ki + 1, label, quota: isQuota, err: lastErr.message.slice(0, 200) },
+          isQuota ? "Quota hit — trying next key/model" : "Model call failed — trying next"
+        );
       }
-      log.warn({ modelName, label, err: lastErr.message }, "Model call failed");
     }
   }
 
   if (!responseText) {
-    log.error({ label, err: lastErr?.message }, "All models failed");
-    if (isQuotaError) return "quota";
+    log.error({ label, err: lastErr?.message?.slice(0, 200) }, "All key+model combinations failed");
+    if (allQuota) return "quota";
     return null;
   }
 
@@ -650,25 +676,26 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
 
   // ── Phase 3: Gemini extraction (single call, 2-chunk fallback if rare edge case) ──
 
-  const genAI = getGeminiClient();
+  const clients = getGeminiClients();
   const allResults: ExtractedPolicies[] = [];
-
   let quotaHit = false;
 
+  log.info({ keys: clients.length, models: MODEL_PRIORITY.length }, "Starting Gemini extraction");
+
   if (combinedDocument.length <= MAX_CHUNK_CHARS) {
-    // Standard path: single call (handles nearly all real sites)
-    const result = await callGemini(genAI, combinedDocument, "full-document", log);
+    // Standard path: single call with all content
+    const result = await callGemini(clients, combinedDocument, "full-document", log);
     if (result === "quota") { quotaHit = true; }
     else if (result) allResults.push(result);
   } else {
-    // Rare fallback: content still large, split into 2 sequential calls
+    // Fallback: content too large — split into 2 sequential calls with delay
     const fallbackChunks = splitForFallback(combinedDocument).slice(0, 2);
     log.info({ chunks: fallbackChunks.length }, "Document large — using 2-chunk sequential fallback");
     for (let i = 0; i < fallbackChunks.length; i++) {
-      const result = await callGemini(genAI, fallbackChunks[i], `chunk-${i + 1}-of-${fallbackChunks.length}`, log);
+      const result = await callGemini(clients, fallbackChunks[i], `chunk-${i + 1}-of-${fallbackChunks.length}`, log);
       if (result === "quota") { quotaHit = true; break; }
       else if (result) allResults.push(result);
-      if (i < fallbackChunks.length - 1) await delay(7000); // Respect 10 RPM free tier limit
+      if (i < fallbackChunks.length - 1) await delay(7000);
     }
   }
 
