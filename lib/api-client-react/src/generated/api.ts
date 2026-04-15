@@ -5,18 +5,26 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
+  MutationFunction,
   QueryFunction,
   QueryKey,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult,
 } from "@tanstack/react-query";
 
-import type { HealthStatus } from "./api.schemas";
+import type {
+  ErrorResponse,
+  ExtractPoliciesBody,
+  HealthStatus,
+  PolicyExtractionResult,
+} from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
-import type { ErrorType } from "../custom-fetch";
+import type { ErrorType, BodyType } from "../custom-fetch";
 
 type AwaitedInput<T> = PromiseLike<T> | T;
 
@@ -99,3 +107,90 @@ export function useHealthCheck<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * Fetches the given URL and uses AI to extract cancellation and payment policies
+ * @summary Extract policies from a URL
+ */
+export const getExtractPoliciesUrl = () => {
+  return `/api/extract-policies`;
+};
+
+export const extractPolicies = async (
+  extractPoliciesBody: ExtractPoliciesBody,
+  options?: RequestInit,
+): Promise<PolicyExtractionResult> => {
+  return customFetch<PolicyExtractionResult>(getExtractPoliciesUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(extractPoliciesBody),
+  });
+};
+
+export const getExtractPoliciesMutationOptions = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof extractPolicies>>,
+    TError,
+    { data: BodyType<ExtractPoliciesBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof extractPolicies>>,
+  TError,
+  { data: BodyType<ExtractPoliciesBody> },
+  TContext
+> => {
+  const mutationKey = ["extractPolicies"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof extractPolicies>>,
+    { data: BodyType<ExtractPoliciesBody> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return extractPolicies(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ExtractPoliciesMutationResult = NonNullable<
+  Awaited<ReturnType<typeof extractPolicies>>
+>;
+export type ExtractPoliciesMutationBody = BodyType<ExtractPoliciesBody>;
+export type ExtractPoliciesMutationError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Extract policies from a URL
+ */
+export const useExtractPolicies = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof extractPolicies>>,
+    TError,
+    { data: BodyType<ExtractPoliciesBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof extractPolicies>>,
+  TError,
+  { data: BodyType<ExtractPoliciesBody> },
+  TContext
+> => {
+  return useMutation(getExtractPoliciesMutationOptions(options));
+};

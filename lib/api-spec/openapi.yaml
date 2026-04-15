@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: policies
+    description: Policy extraction operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /extract-policies:
+    post:
+      operationId: extractPolicies
+      tags: [policies]
+      summary: Extract policies from a URL
+      description: Fetches the given URL and uses AI to extract cancellation and payment policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractPoliciesBody"
+      responses:
+        "200":
+          description: Extraction result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyExtractionResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +66,83 @@ components:
           type: string
       required:
         - status
-
+    ExtractPoliciesBody:
+      type: object
+      properties:
+        url:
+          type: string
+          description: The URL of the accommodation/housing website to extract policies from
+      required:
+        - url
+    CancellationPolicies:
+      type: object
+      properties:
+        coolingOffPeriod:
+          type: ["string", "null"]
+        noVisaNoPay:
+          type: ["string", "null"]
+        noPlaceNoPay:
+          type: ["string", "null"]
+        universityCourseModification:
+          type: ["string", "null"]
+        earlyTermination:
+          type: ["string", "null"]
+        delayedArrivals:
+          type: ["string", "null"]
+        replacementTenant:
+          type: ["string", "null"]
+        deferringStudies:
+          type: ["string", "null"]
+        universityIntakeDelayed:
+          type: ["string", "null"]
+        noQuestionsAsked:
+          type: ["string", "null"]
+        extenuatingCircumstances:
+          type: ["string", "null"]
+        other:
+          type: ["string", "null"]
+    PaymentPolicies:
+      type: object
+      properties:
+        bookingDeposit:
+          type: ["string", "null"]
+        securityDeposit:
+          type: ["string", "null"]
+        paymentInstalmentPlan:
+          type: ["string", "null"]
+        modeOfPayment:
+          type: ["string", "null"]
+        guarantorRequirement:
+          type: ["string", "null"]
+        additionalFees:
+          type: ["string", "null"]
+    PolicyExtractionResult:
+      type: object
+      properties:
+        url:
+          type: string
+        pagesVisited:
+          type: array
+          items:
+            type: string
+        cancellationPolicies:
+          $ref: "#/components/schemas/CancellationPolicies"
+        paymentPolicies:
+          $ref: "#/components/schemas/PaymentPolicies"
+        extractedAt:
+          type: string
+        rawText:
+          type: ["string", "null"]
+      required:
+        - url
+        - pagesVisited
+        - cancellationPolicies
+        - paymentPolicies
+        - extractedAt
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error

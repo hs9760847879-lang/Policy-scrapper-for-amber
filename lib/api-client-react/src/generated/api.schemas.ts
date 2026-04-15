@@ -8,3 +8,64 @@
 export interface HealthStatus {
   status: string;
 }
+
+export interface ExtractPoliciesBody {
+  /** The URL of the accommodation/housing website to extract policies from */
+  url: string;
+}
+
+export interface CancellationPolicies {
+  /** @nullable */
+  coolingOffPeriod?: string | null;
+  /** @nullable */
+  noVisaNoPay?: string | null;
+  /** @nullable */
+  noPlaceNoPay?: string | null;
+  /** @nullable */
+  universityCourseModification?: string | null;
+  /** @nullable */
+  earlyTermination?: string | null;
+  /** @nullable */
+  delayedArrivals?: string | null;
+  /** @nullable */
+  replacementTenant?: string | null;
+  /** @nullable */
+  deferringStudies?: string | null;
+  /** @nullable */
+  universityIntakeDelayed?: string | null;
+  /** @nullable */
+  noQuestionsAsked?: string | null;
+  /** @nullable */
+  extenuatingCircumstances?: string | null;
+  /** @nullable */
+  other?: string | null;
+}
+
+export interface PaymentPolicies {
+  /** @nullable */
+  bookingDeposit?: string | null;
+  /** @nullable */
+  securityDeposit?: string | null;
+  /** @nullable */
+  paymentInstalmentPlan?: string | null;
+  /** @nullable */
+  modeOfPayment?: string | null;
+  /** @nullable */
+  guarantorRequirement?: string | null;
+  /** @nullable */
+  additionalFees?: string | null;
+}
+
+export interface PolicyExtractionResult {
+  url: string;
+  pagesVisited: string[];
+  cancellationPolicies: CancellationPolicies;
+  paymentPolicies: PaymentPolicies;
+  extractedAt: string;
+  /** @nullable */
+  rawText?: string | null;
+}
+
+export interface ErrorResponse {
+  error: string;
+}

@@ -14,3 +14,44 @@ import * as zod from "zod";
 export const HealthCheckResponse = zod.object({
   status: zod.string(),
 });
+
+/**
+ * Fetches the given URL and uses AI to extract cancellation and payment policies
+ * @summary Extract policies from a URL
+ */
+export const ExtractPoliciesBody = zod.object({
+  url: zod
+    .string()
+    .describe(
+      "The URL of the accommodation\/housing website to extract policies from",
+    ),
+});
+
+export const ExtractPoliciesResponse = zod.object({
+  url: zod.string(),
+  pagesVisited: zod.array(zod.string()),
+  cancellationPolicies: zod.object({
+    coolingOffPeriod: zod.string().nullish(),
+    noVisaNoPay: zod.string().nullish(),
+    noPlaceNoPay: zod.string().nullish(),
+    universityCourseModification: zod.string().nullish(),
+    earlyTermination: zod.string().nullish(),
+    delayedArrivals: zod.string().nullish(),
+    replacementTenant: zod.string().nullish(),
+    deferringStudies: zod.string().nullish(),
+    universityIntakeDelayed: zod.string().nullish(),
+    noQuestionsAsked: zod.string().nullish(),
+    extenuatingCircumstances: zod.string().nullish(),
+    other: zod.string().nullish(),
+  }),
+  paymentPolicies: zod.object({
+    bookingDeposit: zod.string().nullish(),
+    securityDeposit: zod.string().nullish(),
+    paymentInstalmentPlan: zod.string().nullish(),
+    modeOfPayment: zod.string().nullish(),
+    guarantorRequirement: zod.string().nullish(),
+    additionalFees: zod.string().nullish(),
+  }),
+  extractedAt: zod.string(),
+  rawText: zod.string().nullish(),
+});
