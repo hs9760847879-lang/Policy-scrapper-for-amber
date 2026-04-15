@@ -321,9 +321,19 @@ export default function Extractor() {
             data-testid="error-message"
           >
             <AlertCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
-            <div>
+            <div className="space-y-1.5">
               <p className="text-sm font-medium text-destructive">Extraction Failed</p>
-              <p className="text-sm text-destructive/80 mt-0.5">{error}</p>
+              <p className="text-sm text-destructive/80">{error}</p>
+              {(error?.toLowerCase().includes("blocked") || error?.toLowerCase().includes("403") || error?.toLowerCase().includes("bot protection")) && (
+                <div className="mt-2 text-xs text-muted-foreground bg-background/60 rounded-md px-3 py-2 border border-border/50">
+                  <p className="font-medium text-foreground mb-1">Tips to get around this:</p>
+                  <ul className="space-y-0.5 list-disc list-inside">
+                    <li>Try the site's <strong>terms</strong> or <strong>policy page</strong> URL directly (e.g. <code className="text-xs bg-muted px-1 rounded">/cancellation-policy</code>)</li>
+                    <li>Try the site's main homepage URL instead of a specific room page</li>
+                    <li>Look for a <strong>/faq</strong> or <strong>/terms-and-conditions</strong> URL on the site</li>
+                  </ul>
+                </div>
+              )}
             </div>
           </div>
         )}
