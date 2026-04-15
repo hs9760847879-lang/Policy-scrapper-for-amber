@@ -11,7 +11,7 @@ function getGeminiClient(): GoogleGenerativeAI {
   return new GoogleGenerativeAI(apiKey);
 }
 
-// ─── User Agents ────────────────────────────────────────────────────────────
+// ─── User Agents ─────────────────────────────────────────────────────────────
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -50,15 +50,28 @@ function buildBrowserHeaders(ua: string, origin?: string): Record<string, string
   return h;
 }
 
-// ─── Fetch Strategies ────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
+type ReqLog = {
+  info(obj: object, msg: string): void;
+  warn(obj: object, msg: string): void;
+  error(obj: object, msg: string): void;
+};
 
 interface FetchResult {
-  text: string;      // Clean text content
-  source: string;    // Which strategy succeeded
+  text: string;
+  html: string;
+  source: string;
   finalUrl: string;
 }
 
-/** Strategy 1: Jina AI Reader — renders JS, bypasses most bot protection */
+type PolicyMap = Record<string, string | null>;
+interface ExtractedPolicies {
+  cancellationPolicies: PolicyMap;
+  paymentPolicies: PolicyMap;
+}
+
+// ─── Fetch Strategies ────────────────────────────────────────────────────────
+
 async function fetchViaJina(url: string): Promise<FetchResult> {
   const jinaUrl = `https://r.jina.ai/${url}`;
   const res = await fetch(jinaUrl, {
@@ -72,10 +85,9 @@ async function fetchViaJina(url: string): Promise<FetchResult> {
   if (!res.ok) throw new Error(`Jina HTTP ${res.status}`);
   const text = await res.text();
   if (text.length < 100) throw new Error("Jina returned empty content");
-  return { text, source: "jina", finalUrl: url };
+  return { text, html: text, source: "jina", finalUrl: url };
 }
 
-/** Strategy 2: Direct fetch with rotating User-Agents */
 async function fetchDirect(url: string): Promise<FetchResult> {
   const errors: string[] = [];
   for (let i = 0; i < USER_AGENTS.length; i++) {
@@ -87,7 +99,7 @@ async function fetchDirect(url: string): Promise<FetchResult> {
       });
       if (res.ok) {
         const html = await res.text();
-        return { text: extractTextFromHtml(html), source: `direct-ua${i}`, finalUrl: res.url || url };
+        return { text: extractTextFromHtml(html), html, source: `direct-ua${i}`, finalUrl: res.url || url };
       }
       errors.push(`UA${i}:${res.status}`);
       if (res.status === 404 || res.status >= 500) break;
@@ -99,7 +111,6 @@ async function fetchDirect(url: string): Promise<FetchResult> {
   throw new Error(`Direct fetch failed: ${errors.join(", ")}`);
 }
 
-/** Strategy 3: Google Web Cache */
 async function fetchGoogleCache(url: string): Promise<FetchResult> {
   const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(url)}&hl=en`;
   const res = await fetch(cacheUrl, {
@@ -110,12 +121,10 @@ async function fetchGoogleCache(url: string): Promise<FetchResult> {
   const html = await res.text();
   const text = extractTextFromHtml(html);
   if (text.length < 100) throw new Error("Google cache returned empty content");
-  return { text, source: "google-cache", finalUrl: url };
+  return { text, html, source: "google-cache", finalUrl: url };
 }
 
-/** Strategy 4: Wayback Machine (Internet Archive) */
 async function fetchWayback(url: string): Promise<FetchResult> {
-  // Find most recent snapshot
   const apiUrl = `https://archive.org/wayback/available?url=${encodeURIComponent(url)}`;
   const apiRes = await fetch(apiUrl, { signal: AbortSignal.timeout(10000) });
   if (!apiRes.ok) throw new Error("Wayback API unavailable");
@@ -132,10 +141,9 @@ async function fetchWayback(url: string): Promise<FetchResult> {
   const html = await res.text();
   const text = extractTextFromHtml(html);
   if (text.length < 100) throw new Error("Wayback returned empty content");
-  return { text, source: "wayback", finalUrl: snapshotUrl };
+  return { text, html, source: "wayback", finalUrl: snapshotUrl };
 }
 
-/** Strategy 5: Bing search cache via Jina */
 async function fetchViaBingJina(url: string): Promise<FetchResult> {
   const bingCacheUrl = `https://cc.bingj.com/cache.aspx?q=${encodeURIComponent(url)}&url=${encodeURIComponent(url)}`;
   const jinaUrl = `https://r.jina.ai/${bingCacheUrl}`;
@@ -146,23 +154,20 @@ async function fetchViaBingJina(url: string): Promise<FetchResult> {
   if (!res.ok) throw new Error(`Bing+Jina HTTP ${res.status}`);
   const text = await res.text();
   if (text.length < 100) throw new Error("Bing+Jina returned empty content");
-  return { text, source: "bing-jina", finalUrl: url };
+  return { text, html: text, source: "bing-jina", finalUrl: url };
 }
 
-/** Run all strategies in parallel, return first success */
 async function fetchRobust(url: string, log: ReqLog): Promise<FetchResult> {
-  log.info({ url }, "Starting robust fetch across all strategies");
+  log.info({ url }, "Fetching page");
 
-  // Try Jina first (fastest and most reliable for JS-rendered sites)
   try {
     const r = await fetchViaJina(url);
-    log.info({ url, source: r.source, len: r.text.length }, "Fetch succeeded");
+    log.info({ url, source: r.source, len: r.text.length }, "Fetch succeeded via Jina");
     return r;
   } catch (e) {
     log.warn({ url, err: String(e) }, "Jina failed, trying parallel strategies");
   }
 
-  // Try remaining strategies in parallel, take first winner
   const results = await Promise.allSettled([
     fetchDirect(url),
     fetchGoogleCache(url),
@@ -177,7 +182,7 @@ async function fetchRobust(url: string, log: ReqLog): Promise<FetchResult> {
     }
   }
 
-  const errors = results.map((r) => r.status === "rejected" ? r.reason : "empty");
+  const errors = results.map((r) => r.status === "rejected" ? String(r.reason) : "empty");
   throw new Error(`All fetch strategies failed for ${url}. Errors: ${errors.join(" | ")}`);
 }
 
@@ -196,100 +201,313 @@ function extractTextFromHtml(html: string): string {
   return $("body").text().replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function findPolicyLinks(html: string, baseUrl: string): string[] {
+/**
+ * Extract internal links with smart prioritization:
+ * 1. Policy/terms/faq pages get top priority
+ * 2. Navigation/info pages second
+ * 3. Other internal pages fill the remainder
+ * Returns up to `limit` links total.
+ */
+function findAllInternalLinks(html: string, baseUrl: string, limit = 20): string[] {
   const $ = cheerio.load(html);
   const base = new URL(baseUrl);
-  const policyKeywords = [
+
+  const SKIP_PATTERNS = /\.(jpg|jpeg|png|gif|pdf|doc|docx|zip|css|js|ico|svg|xml|json|mp4|webp|woff|woff2|ttf|eot)$/i;
+  const SKIP_PATHS = /\/(login|logout|signup|register|cart|checkout|account|auth|cdn-cgi|wp-admin|wp-json|api\/|sitemap|robots\.txt)/i;
+
+  // Policy-related keywords — highest priority
+  const POLICY_KEYWORDS = [
     "cancellation", "cancel", "policy", "policies", "terms", "conditions",
     "booking", "payment", "refund", "deposit", "faq", "faqs", "help",
-    "deferral", "visa", "guarantor", "fees",
+    "deferral", "visa", "guarantor", "fees", "charges", "instalment",
+    "installment", "cooling", "tenancy", "agreement", "legal", "contract",
   ];
-  const links = new Set<string>();
+
+  // Navigation/info keywords — medium priority
+  const INFO_KEYWORDS = [
+    "about", "how", "info", "guide", "student", "living", "support",
+    "contact", "services", "facilities", "amenities",
+  ];
+
+  const highPriority = new Set<string>();
+  const medPriority = new Set<string>();
+  const lowPriority = new Set<string>();
+
   $("a[href]").each((_: number, el: cheerio.Element) => {
     const href = $(el).attr("href");
-    if (!href) return;
+    if (!href || href.startsWith("#") || href.startsWith("mailto:") || href.startsWith("tel:")) return;
     try {
       const full = new URL(href, baseUrl);
       if (full.origin !== base.origin) return;
-      if (full.pathname.match(/\.(jpg|jpeg|png|gif|pdf|doc|docx|zip|css|js|ico|svg|xml|json|mp4|webp)$/i)) return;
       if (full.pathname === base.pathname) return;
-      const txt = ($(el).text() || "").toLowerCase();
-      const urlL = full.pathname.toLowerCase();
-      if (policyKeywords.some((kw) => txt.includes(kw) || urlL.includes(kw))) {
-        full.hash = "";
-        links.add(full.href);
+      if (SKIP_PATTERNS.test(full.pathname)) return;
+      if (SKIP_PATHS.test(full.pathname)) return;
+      full.hash = "";
+      full.search = "";
+      const linkText = ($(el).text() || "").toLowerCase();
+      const pathL = full.pathname.toLowerCase();
+      const combined = linkText + " " + pathL;
+
+      if (POLICY_KEYWORDS.some((kw) => combined.includes(kw))) {
+        highPriority.add(full.href);
+      } else if (INFO_KEYWORDS.some((kw) => combined.includes(kw))) {
+        medPriority.add(full.href);
+      } else {
+        lowPriority.add(full.href);
       }
     } catch { /* skip */ }
   });
-  return Array.from(links).slice(0, 6);
+
+  // Combine: policy pages first, then info pages, then others
+  const ordered = [
+    ...Array.from(highPriority),
+    ...Array.from(medPriority).filter((l) => !highPriority.has(l)),
+    ...Array.from(lowPriority).filter((l) => !highPriority.has(l) && !medPriority.has(l)),
+  ];
+
+  return ordered.slice(0, limit);
 }
 
 function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-type ReqLog = {
-  info(obj: object, msg: string): void;
-  warn(obj: object, msg: string): void;
-  error(obj: object, msg: string): void;
-};
+// ─── Smart policy-relevant text extraction ────────────────────────────────────
+// Instead of sending entire pages, score paragraphs by policy keyword density
+// and send only the highest-relevance content to Gemini.
 
-// ─── Gemini Prompt ───────────────────────────────────────────────────────────
-const EXTRACTION_PROMPT = `You are a policy extraction specialist for student accommodation and housing websites.
-Analyze the following web page content and extract specific policy information.
+const MAX_COMBINED_CHARS = 50000; // hard cap — keeps usage to 1 Gemini call
+const MAX_CHARS_PER_PAGE = 8000;  // max chars we take from any single page
 
-Return a JSON object with exactly this structure (use null for any policy not found or not mentioned):
+const POLICY_SCORE_KEYWORDS = [
+  // High-weight terms (cancellation/payment policy vocabulary)
+  "cancellation", "cancel", "refund", "cooling off", "cooling-off",
+  "no visa", "no place", "no pay", "visa", "deferr", "defer",
+  "early termination", "terminate", "replacement tenant", "booking fee",
+  "security deposit", "damage deposit", "instalment", "installment",
+  "payment plan", "guarantor", "booking deposit", "admin fee",
+  "extenuating", "circumstances", "bereavement", "medical",
+  "delayed arrival", "intake", "university place",
+  // Medium-weight terms
+  "policy", "policies", "terms", "conditions", "clause",
+  "deposit", "payment", "fee", "charge", "penalty",
+  "tenancy", "agreement", "contract", "booking",
+];
+
+/**
+ * Score a paragraph by its policy-relevance (higher = more relevant).
+ */
+function scoreParagraph(para: string): number {
+  const lower = para.toLowerCase();
+  let score = 0;
+  for (const kw of POLICY_SCORE_KEYWORDS) {
+    if (lower.includes(kw)) score += kw.length > 8 ? 3 : 1;
+  }
+  return score;
+}
+
+/**
+ * Extract only the most policy-relevant paragraphs from page text.
+ * Takes paragraphs in score order until `maxChars` is reached.
+ */
+function extractRelevantText(pageText: string, maxChars = MAX_CHARS_PER_PAGE): string {
+  const paragraphs = pageText.split(/\n{2,}/).filter((p) => p.trim().length > 30);
+
+  // Score each paragraph
+  const scored = paragraphs.map((p) => ({ text: p.trim(), score: scoreParagraph(p) }));
+
+  // Sort by score descending, then keep document order for top ones
+  // Strategy: take all high-score paragraphs first, then pad with more if space allows
+  const highScore = scored.filter((p) => p.score > 0).sort((a, b) => b.score - a.score);
+  const noScore = scored.filter((p) => p.score === 0);
+
+  const selected: string[] = [];
+  let totalChars = 0;
+
+  for (const p of [...highScore, ...noScore]) {
+    if (totalChars + p.text.length > maxChars) break;
+    selected.push(p.text);
+    totalChars += p.text.length;
+  }
+
+  return selected.join("\n\n");
+}
+
+// Fallback split if combined is somehow still large (rare)
+const MAX_CHUNK_CHARS = 48000;
+
+function splitForFallback(text: string): string[] {
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    chunks.push(text.slice(i, i + MAX_CHUNK_CHARS));
+    i += MAX_CHUNK_CHARS;
+  }
+  return chunks;
+}
+
+// ─── Gemini Prompt ────────────────────────────────────────────────────────────
+
+const EXTRACTION_PROMPT = `You are extracting policy information from a student accommodation website page chunk.
+
+CRITICAL RULES — read carefully:
+1. Extract ONLY text that is EXPLICITLY written on this page. Copy the EXACT wording from the source.
+2. Do NOT paraphrase, summarize, rewrite, or add any information not present in this chunk.
+3. Do NOT infer, guess, or assume any policy from general context. Null means not found.
+4. If a policy IS found, include the complete verbatim passage (including all specific amounts, timeframes, percentages, and conditions stated).
+5. Return null for any policy not explicitly mentioned in this chunk.
+6. Return ONLY valid JSON — no markdown, no code blocks, no commentary.
+
+Return this exact JSON structure:
 {
   "cancellationPolicies": {
-    "coolingOffPeriod": "detailed description or null",
-    "noVisaNoPay": "detailed description or null",
-    "noPlaceNoPay": "detailed description or null",
-    "universityCourseModification": "detailed description or null",
-    "earlyTermination": "detailed description or null",
-    "delayedArrivals": "detailed description or null",
-    "replacementTenant": "detailed description or null",
-    "deferringStudies": "detailed description or null",
-    "universityIntakeDelayed": "detailed description or null",
-    "noQuestionsAsked": "detailed description or null",
-    "extenuatingCircumstances": "detailed description or null",
-    "other": "any other cancellation policies not covered above, or null"
+    "coolingOffPeriod": "<exact verbatim text from page, or null>",
+    "noVisaNoPay": "<exact verbatim text from page, or null>",
+    "noPlaceNoPay": "<exact verbatim text from page, or null>",
+    "universityCourseModification": "<exact verbatim text from page, or null>",
+    "earlyTermination": "<exact verbatim text from page, or null>",
+    "delayedArrivals": "<exact verbatim text from page, or null>",
+    "replacementTenant": "<exact verbatim text from page, or null>",
+    "deferringStudies": "<exact verbatim text from page, or null>",
+    "universityIntakeDelayed": "<exact verbatim text from page, or null>",
+    "noQuestionsAsked": "<exact verbatim text from page, or null>",
+    "extenuatingCircumstances": "<exact verbatim text from page, or null>",
+    "other": "<exact verbatim text for any other cancellation policy not listed above, or null>"
   },
   "paymentPolicies": {
-    "bookingDeposit": "detailed description or null",
-    "securityDeposit": "detailed description or null",
-    "paymentInstalmentPlan": "detailed description or null",
-    "modeOfPayment": "detailed description or null",
-    "guarantorRequirement": "detailed description or null",
-    "additionalFees": "detailed description or null"
+    "bookingDeposit": "<exact verbatim text from page, or null>",
+    "securityDeposit": "<exact verbatim text from page, or null>",
+    "paymentInstalmentPlan": "<exact verbatim text from page, or null>",
+    "modeOfPayment": "<exact verbatim text from page, or null>",
+    "guarantorRequirement": "<exact verbatim text from page, or null>",
+    "additionalFees": "<exact verbatim text from page, or null>"
   }
 }
 
-Policy definitions:
-- coolingOffPeriod: Period after signing where tenant can cancel without penalty
-- noVisaNoPay: Policy if student cannot get a visa
+Policy definitions (use these ONLY to identify which category to assign found text to):
+- coolingOffPeriod: Period after booking/signing where tenant can cancel without penalty
+- noVisaNoPay: Policy if student cannot obtain a visa
 - noPlaceNoPay: Policy if student does not get a university place
-- universityCourseModification: Policy if course is changed/modified/cancelled by university
-- earlyTermination: Policy for students ending tenancy early
+- universityCourseModification: Policy if course is changed/modified/cancelled by the university
+- earlyTermination: Policy for ending tenancy before the contract end date
 - delayedArrivals: Policy for students arriving late or with travel restrictions
-- replacementTenant: Policy about finding a replacement tenant to cancel
+- replacementTenant: Policy about finding or providing a replacement tenant to exit early
 - deferringStudies: Policy for students deferring their university studies
 - universityIntakeDelayed: Policy if university delays its intake/semester start
-- noQuestionsAsked: Unconditional cancellation option (usually within specific timeframe)
-- extenuatingCircumstances: Special circumstances cancellation (medical, family emergencies, etc.)
-- bookingDeposit: Deposit required at booking, amount, refund conditions
+- noQuestionsAsked: Unconditional cancellation option within a specific timeframe
+- extenuatingCircumstances: Cancellation for special circumstances (medical, bereavement, etc.)
+- bookingDeposit: Amount and conditions of deposit required at booking
 - securityDeposit: Security/damage deposit details
-- paymentInstalmentPlan: Instalment/installment payment options available
+- paymentInstalmentPlan: Instalment or installment payment schedule options
 - modeOfPayment: Accepted payment methods
-- guarantorRequirement: Whether a guarantor is needed and requirements
-- additionalFees: Any extra fees, admin fees, late payment fees, etc.
+- guarantorRequirement: Guarantor requirements and criteria
+- additionalFees: Admin fees, late payment fees, or any other extra charges
 
-Important: Only include information explicitly stated in the text. Do not infer or assume. Be detailed and include specific amounts, timeframes, and conditions when mentioned. Return ONLY valid JSON, no markdown.
-
-Web content to analyze:
+Page chunk to analyze:
 `;
 
-// ─── Route ───────────────────────────────────────────────────────────────────
+// ─── Merge Partial Extractions ────────────────────────────────────────────────
+
+function mergeExtractions(results: ExtractedPolicies[]): ExtractedPolicies {
+  const merged: ExtractedPolicies = {
+    cancellationPolicies: {
+      coolingOffPeriod: null,
+      noVisaNoPay: null,
+      noPlaceNoPay: null,
+      universityCourseModification: null,
+      earlyTermination: null,
+      delayedArrivals: null,
+      replacementTenant: null,
+      deferringStudies: null,
+      universityIntakeDelayed: null,
+      noQuestionsAsked: null,
+      extenuatingCircumstances: null,
+      other: null,
+    },
+    paymentPolicies: {
+      bookingDeposit: null,
+      securityDeposit: null,
+      paymentInstalmentPlan: null,
+      modeOfPayment: null,
+      guarantorRequirement: null,
+      additionalFees: null,
+    },
+  };
+
+  for (const result of results) {
+    for (const key of Object.keys(merged.cancellationPolicies)) {
+      if (!merged.cancellationPolicies[key] && result.cancellationPolicies?.[key]) {
+        merged.cancellationPolicies[key] = result.cancellationPolicies[key];
+      }
+    }
+    for (const key of Object.keys(merged.paymentPolicies)) {
+      if (!merged.paymentPolicies[key] && result.paymentPolicies?.[key]) {
+        merged.paymentPolicies[key] = result.paymentPolicies[key];
+      }
+    }
+  }
+
+  return merged;
+}
+
+// ─── Gemini extraction ────────────────────────────────────────────────────────
+
+const MODEL_PRIORITY = ["gemini-2.5-flash", "gemini-2.0-flash"];
+
+async function callGemini(
+  genAI: GoogleGenerativeAI,
+  content: string,
+  label: string,
+  log: ReqLog
+): Promise<ExtractedPolicies | null | "quota"> {
+  let responseText = "";
+  let lastErr: Error | null = null;
+  let isQuotaError = false;
+
+  for (const modelName of MODEL_PRIORITY) {
+    try {
+      log.info({ modelName, label, chars: content.length }, "Calling Gemini");
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: "application/json",
+        },
+      });
+      const result = await model.generateContent(EXTRACTION_PROMPT + content);
+      responseText = result.response.text().trim();
+      log.info({ modelName, label }, "Gemini call succeeded");
+      isQuotaError = false;
+      break;
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+      if (lastErr.message.includes("429") || lastErr.message.includes("quota")) {
+        isQuotaError = true;
+      }
+      log.warn({ modelName, label, err: lastErr.message }, "Model call failed");
+    }
+  }
+
+  if (!responseText) {
+    log.error({ label, err: lastErr?.message }, "All models failed");
+    if (isQuotaError) return "quota";
+    return null;
+  }
+
+  try {
+    const cleaned = responseText
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+    return JSON.parse(cleaned) as ExtractedPolicies;
+  } catch {
+    log.warn({ label, snippet: responseText.slice(0, 300) }, "Failed to parse Gemini JSON");
+    return null;
+  }
+}
+
+// ─── Route ────────────────────────────────────────────────────────────────────
 router.post("/extract-policies", async (req, res): Promise<void> => {
   const parsed = ExtractPoliciesBody.safeParse(req.body);
   if (!parsed.success) {
@@ -315,141 +533,178 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
   log.info({ url }, "Starting policy extraction");
 
   const pagesVisited: string[] = [];
-  const allChunks: string[] = [];
+
+  // ── Phase 1: Fetch all pages ─────────────────────────────────────────────────
+
+  interface PageData {
+    url: string;
+    text: string;
+    html: string;
+  }
+  const pages: PageData[] = [];
 
   try {
-    // ── Step 1: Fetch main URL using all available strategies ────────────────
+    // 1a. Fetch main page
     let mainResult: FetchResult;
     try {
       mainResult = await fetchRobust(url, log);
-      pagesVisited.push(mainResult.finalUrl);
-      allChunks.push(`=== PAGE: ${mainResult.finalUrl} ===\n${mainResult.text}`);
     } catch (mainErr) {
-      // If main page fails, try root domain
       const rootUrl = `${parsedUrl.protocol}//${parsedUrl.host}/`;
       if (rootUrl !== url) {
         log.warn({ url, err: String(mainErr) }, "Main URL failed, trying root domain");
         try {
           mainResult = await fetchRobust(rootUrl, log);
-          pagesVisited.push(mainResult.finalUrl);
-          allChunks.push(`=== PAGE: ${mainResult.finalUrl} ===\n${mainResult.text}`);
-        } catch (rootErr) {
+        } catch {
           res.status(500).json({
-            error: `Unable to access this website through any method. Even the homepage (${rootUrl}) could not be reached. Please check the URL and try again.`,
+            error: `Unable to access this website through any method. Please check the URL and try again.`,
           });
           return;
         }
       } else {
-        res.status(500).json({ error: `Unable to access ${url} through any method. Please check the URL and try again.` });
+        res.status(500).json({ error: `Unable to access ${url}. Please check the URL and try again.` });
         return;
       }
     }
 
-    // ── Step 2: Discover policy sub-pages from the fetched HTML ──────────────
-    // For Jina/text results we may not have HTML — re-fetch HTML for link discovery
-    let htmlForLinks: string | null = null;
-    try {
-      const directRes = await fetch(url, {
-        headers: buildBrowserHeaders(USER_AGENTS[5]), // Googlebot
-        redirect: "follow",
-        signal: AbortSignal.timeout(15000),
-      });
-      if (directRes.ok) htmlForLinks = await directRes.text();
-    } catch { /* ignore, we'll try without link discovery */ }
+    pagesVisited.push(mainResult.finalUrl);
+    pages.push({ url: mainResult.finalUrl, text: mainResult.text, html: mainResult.html });
+    log.info({ url: mainResult.finalUrl, len: mainResult.text.length }, "Main page fetched");
 
-    if (htmlForLinks) {
-      const effectiveBase = pagesVisited[0] ?? url;
-      const policyLinks = findPolicyLinks(htmlForLinks, effectiveBase);
-      log.info({ policyLinks }, "Discovered policy sub-pages");
-
-      await Promise.allSettled(
-        policyLinks
-          .filter((l) => !pagesVisited.includes(l))
-          .map(async (link) => {
-            try {
-              const r = await fetchRobust(link, log);
-              if (r.text.length > 100) {
-                allChunks.push(`=== PAGE: ${r.finalUrl} ===\n${r.text}`);
-                pagesVisited.push(r.finalUrl);
-              }
-            } catch (e) {
-              log.warn({ link, err: String(e) }, "Sub-page fetch failed");
-            }
-          })
-      );
-    }
-
-    if (allChunks.length === 0) {
-      res.status(500).json({ error: "Could not extract any content from this site." });
-      return;
-    }
-
-    // ── Step 3: Gemini AI extraction ─────────────────────────────────────────
-    const combinedText = allChunks.join("\n\n").slice(0, 60000);
-
-    const genAI = getGeminiClient();
-
-    // Try models in priority order — falls back automatically if one is unavailable
-    const MODEL_PRIORITY = [
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      "gemini-2.0-flash-lite",
-    ];
-
-    let responseText = "";
-    let lastModelError: Error | null = null;
-
-    for (const modelName of MODEL_PRIORITY) {
+    // 1b. Discover ALL internal links from the main page HTML
+    // Re-fetch raw HTML for link discovery (Jina returns text, not HTML)
+    let htmlForLinks = mainResult.html;
+    if (mainResult.source === "jina") {
+      // Try to get actual HTML for link discovery
       try {
-        log.info({ modelName }, "Trying Gemini model");
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(EXTRACTION_PROMPT + combinedText);
-        responseText = result.response.text().trim();
-        log.info({ modelName }, "Gemini extraction succeeded");
-        break;
-      } catch (modelErr) {
-        lastModelError = modelErr instanceof Error ? modelErr : new Error(String(modelErr));
-        log.warn({ modelName, err: lastModelError.message }, "Model failed, trying next");
+        const directRes = await fetch(url, {
+          headers: buildBrowserHeaders(USER_AGENTS[5]),
+          redirect: "follow",
+          signal: AbortSignal.timeout(15000),
+        });
+        if (directRes.ok) htmlForLinks = await directRes.text();
+      } catch { /* use text content for link extraction */ }
+    }
+
+    const internalLinks = findAllInternalLinks(htmlForLinks, mainResult.finalUrl, 20);
+    log.info({ count: internalLinks.length, links: internalLinks }, "Discovered internal links");
+
+    // 1c. Fetch all internal links in parallel (max 15)
+    const subResults = await Promise.allSettled(
+      internalLinks
+        .filter((l) => !pagesVisited.includes(l))
+        .slice(0, 15)
+        .map(async (link) => {
+          try {
+            const r = await fetchRobust(link, log);
+            if (r.text.length > 150) {
+              return { url: r.finalUrl, text: r.text, html: r.html };
+            }
+            return null;
+          } catch (e) {
+            log.warn({ link, err: String(e) }, "Sub-page fetch failed");
+            return null;
+          }
+        })
+    );
+
+    for (const r of subResults) {
+      if (r.status === "fulfilled" && r.value) {
+        if (!pagesVisited.includes(r.value.url)) {
+          pagesVisited.push(r.value.url);
+          pages.push(r.value);
+          log.info({ url: r.value.url, len: r.value.text.length }, "Sub-page fetched");
+        }
       }
     }
 
-    if (!responseText) {
-      log.error({ err: lastModelError?.message }, "All Gemini models failed");
-      res.status(500).json({ error: `AI extraction failed: ${lastModelError?.message ?? "unknown error"}` });
-      return;
-    }
-
-    let policies: {
-      cancellationPolicies: Record<string, string | null>;
-      paymentPolicies: Record<string, string | null>;
-    };
-    try {
-      const cleaned = responseText
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/i, "")
-        .trim();
-      policies = JSON.parse(cleaned);
-    } catch {
-      log.error({ responseText }, "Failed to parse Gemini JSON");
-      res.status(500).json({ error: "AI returned an unexpected format. Please try again." });
-      return;
-    }
-
-    res.json({
-      url,
-      pagesVisited,
-      cancellationPolicies: policies.cancellationPolicies ?? {},
-      paymentPolicies: policies.paymentPolicies ?? {},
-      extractedAt: new Date().toISOString(),
-      rawText: null,
-    });
-
-    log.info({ url, pages: pagesVisited.length }, "Policy extraction complete");
-  } catch (err: unknown) {
-    log.error({ err, url }, "Policy extraction failed unexpectedly");
-    res.status(500).json({ error: err instanceof Error ? err.message : "Extraction failed" });
+    log.info({ totalPages: pages.length }, "All pages collected");
+  } catch (err) {
+    log.error({ err, url }, "Page collection failed unexpectedly");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to fetch pages" });
+    return;
   }
+
+  if (pages.length === 0) {
+    res.status(500).json({ error: "Could not retrieve any content from this site." });
+    return;
+  }
+
+  // ── Phase 2: Build focused document from policy-relevant paragraphs ──────────
+  // Each page is filtered to only include paragraphs containing policy keywords.
+  // This dramatically reduces content size and keeps extraction within 1 Gemini call.
+
+  const pageSegments: string[] = [];
+  for (const page of pages) {
+    const relevant = extractRelevantText(page.text, MAX_CHARS_PER_PAGE);
+    if (relevant.trim().length > 50) {
+      pageSegments.push(`=== SOURCE: ${page.url} ===\n${relevant}`);
+    }
+  }
+
+  const combinedDocument = pageSegments.join("\n\n").slice(0, MAX_COMBINED_CHARS);
+
+  log.info(
+    { totalChars: combinedDocument.length, pages: pages.length, segments: pageSegments.length },
+    "Policy-focused document built"
+  );
+
+  // ── Phase 3: Gemini extraction (single call, 2-chunk fallback if rare edge case) ──
+
+  const genAI = getGeminiClient();
+  const allResults: ExtractedPolicies[] = [];
+
+  let quotaHit = false;
+
+  if (combinedDocument.length <= MAX_CHUNK_CHARS) {
+    // Standard path: single call (handles nearly all real sites)
+    const result = await callGemini(genAI, combinedDocument, "full-document", log);
+    if (result === "quota") { quotaHit = true; }
+    else if (result) allResults.push(result);
+  } else {
+    // Rare fallback: content still large, split into 2 sequential calls
+    const fallbackChunks = splitForFallback(combinedDocument).slice(0, 2);
+    log.info({ chunks: fallbackChunks.length }, "Document large — using 2-chunk sequential fallback");
+    for (let i = 0; i < fallbackChunks.length; i++) {
+      const result = await callGemini(genAI, fallbackChunks[i], `chunk-${i + 1}-of-${fallbackChunks.length}`, log);
+      if (result === "quota") { quotaHit = true; break; }
+      else if (result) allResults.push(result);
+      if (i < fallbackChunks.length - 1) await delay(7000); // Respect 10 RPM free tier limit
+    }
+  }
+
+  if (allResults.length === 0) {
+    if (quotaHit) {
+      res.status(429).json({
+        error: "Your Google AI API key has reached its free tier daily request limit (20 requests/day for Gemini 2.5 Flash). The quota resets at midnight Pacific Time. Please try again tomorrow, or visit https://ai.google.dev to upgrade your API plan.",
+      });
+    } else {
+      res.status(500).json({ error: "AI extraction failed — could not parse any policy data. Please try again." });
+    }
+    return;
+  }
+
+  // ── Phase 4: Merge results (first non-null value per policy wins) ─────────────
+
+  const merged = mergeExtractions(allResults);
+
+  log.info(
+    {
+      url,
+      pages: pagesVisited.length,
+      totalChars: combinedDocument.length,
+      resultsAggregated: allResults.length,
+    },
+    "Policy extraction complete"
+  );
+
+  res.json({
+    url,
+    pagesVisited,
+    cancellationPolicies: merged.cancellationPolicies,
+    paymentPolicies: merged.paymentPolicies,
+    extractedAt: new Date().toISOString(),
+    rawText: null,
+  });
 });
 
 export default router;
