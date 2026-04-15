@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Policy Extractor"
+version = "1.0.0"
+id = "artifacts/policy-extractor"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18517
+
+[services.development]
+run = "pnpm --filter @workspace/policy-extractor run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/policy-extractor", "run", "build" ]
+publicDir = "artifacts/policy-extractor/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18517"
+BASE_PATH = "/"
