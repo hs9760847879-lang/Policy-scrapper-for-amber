@@ -280,8 +280,8 @@ function delay(ms: number) {
 // Instead of sending entire pages, score paragraphs by policy keyword density
 // and send only the highest-relevance content to Gemini.
 
-const MAX_COMBINED_CHARS = 50000; // hard cap — keeps usage to 1 Gemini call
-const MAX_CHARS_PER_PAGE = 8000;  // max chars we take from any single page
+const MAX_COMBINED_CHARS = 42000; // hard cap — keeps usage to 1 Gemini call
+const MAX_CHARS_PER_PAGE = 5000;  // max chars we take from any single page
 
 const POLICY_SCORE_KEYWORDS = [
   // High-weight terms (cancellation/payment policy vocabulary)
@@ -456,12 +456,14 @@ function mergeExtractions(results: ExtractedPolicies[]): ExtractedPolicies {
 
 // ─── Gemini extraction ────────────────────────────────────────────────────────
 
-// Models in priority order — best/newest first
+// Models in priority order — best first, confirmed stable
 const MODEL_PRIORITY = [
-  "gemini-2.5-flash",       // Gemini 2.5 Flash — primary
-  "gemini-3-flash-preview", // Gemini 3 Flash — next best
-  "gemini-2.5-flash-lite",  // Gemini 2.5 Flash Lite — lightweight fallback
+  "gemini-2.5-flash",      // Gemini 2.5 Flash — primary (fastest, best quality)
+  "gemini-2.5-flash-lite", // Gemini 2.5 Flash Lite — lighter, higher quota limits
+  "gemini-2.0-flash",      // Gemini 2.0 Flash — reliable stable fallback
 ];
+
+const GEMINI_CALL_TIMEOUT_MS = 45000; // 45 seconds per call — prevents slow models stalling
 
 /**
  * Try content extraction across all (key × model) combinations.
@@ -498,7 +500,12 @@ async function callGemini(
             responseMimeType: "application/json",
           },
         });
-        const result = await model.generateContent(EXTRACTION_PROMPT + content);
+        const result = await Promise.race([
+          model.generateContent(EXTRACTION_PROMPT + content),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Gemini timeout after ${GEMINI_CALL_TIMEOUT_MS / 1000}s`)), GEMINI_CALL_TIMEOUT_MS)
+          ),
+        ]);
         responseText = result.response.text().trim();
         log.info({ modelName, keyIndex: ki + 1, label }, "Gemini call succeeded");
         break outer; // success — stop trying
