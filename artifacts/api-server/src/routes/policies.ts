@@ -194,7 +194,25 @@ async function fetchRobust(url: string, log: ReqLog): Promise<FetchResult> {
 
 function extractTextFromHtml(html: string): string {
   const $ = cheerio.load(html);
-  $("script, style, noscript, iframe, svg, [role='navigation'], [role='banner'], header, footer, nav").remove();
+
+  // Remove non-content elements
+  $("script, style, noscript, iframe, svg, [role='navigation'], [role='banner'], header, footer, nav, .cookie-banner, .cookie-consent").remove();
+
+  // Force-reveal hidden accordion/collapse/tab content so it's included in text extraction.
+  // Many sites use aria-hidden, display:none, or class-based hiding for their FAQ accordions.
+  $("[aria-hidden='true']").attr("aria-hidden", "false");
+  $("[hidden]").removeAttr("hidden");
+  // Expand <details> elements (native HTML accordions)
+  $("details").attr("open", "");
+  // Force visibility on common accordion/tab panel classes
+  $(
+    ".accordion-content, .accordion-body, .accordion__content, .accordion__body, " +
+    ".collapse, .collapsible-content, .panel-body, .tab-content, .tab-pane, " +
+    ".faq-answer, .faq__answer, .faq-body, " +
+    "[class*='accordion'][class*='content'], [class*='accordion'][class*='body'], " +
+    "[class*='collapse'][class*='content'], [class*='panel'][class*='body']"
+  ).css("display", "block");
+
   const selectors = ["main", "article", "#content", "#main", ".content", ".main", ".page-content", "body"];
   for (const sel of selectors) {
     const el = $(sel);
@@ -280,8 +298,9 @@ function delay(ms: number) {
 // Instead of sending entire pages, score paragraphs by policy keyword density
 // and send only the highest-relevance content to Gemini.
 
-const MAX_COMBINED_CHARS = 42000; // hard cap — keeps usage to 1 Gemini call
-const MAX_CHARS_PER_PAGE = 5000;  // max chars we take from any single page
+const MAX_COMBINED_CHARS = 52000; // hard cap — keeps usage to 1 Gemini call
+const MAX_CHARS_PER_PAGE = 6000;  // max chars we take from any single page
+const MIN_PAGE_POLICY_CHARS = 150; // pages with fewer scored chars than this are excluded
 
 const POLICY_SCORE_KEYWORDS = [
   // ── Cancellation policy vocabulary ───────────────────────────────────────
@@ -352,7 +371,7 @@ function extractRelevantText(pageText: string, maxChars = MAX_CHARS_PER_PAGE): s
 }
 
 // Fallback split if combined is somehow still large (rare)
-const MAX_CHUNK_CHARS = 48000;
+const MAX_CHUNK_CHARS = 55000;
 
 function splitForFallback(text: string): string[] {
   const chunks: string[] = [];
@@ -595,92 +614,138 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
   const log: ReqLog = req.log;
   log.info({ url }, "Starting policy extraction");
 
+  const rootUrl = `${parsedUrl.protocol}//${parsedUrl.host}/`;
+
+  // Common policy-relevant paths to probe on every site regardless of starting URL
+  const PROBE_PATHS = [
+    "/faq", "/faqs", "/faq/", "/faqs/",
+    "/terms", "/terms-and-conditions", "/terms-conditions", "/terms/",
+    "/cancellation-policy", "/cancellation", "/cancel",
+    "/payment-policy", "/payment", "/payments",
+    "/booking-policy", "/how-to-book", "/book-now",
+    "/policies", "/legal", "/help", "/support",
+    "/booking-terms", "/tenancy-terms", "/resident-terms",
+    "/deposit", "/deposits", "/fees",
+    "/privacy-policy",  // often has booking/payment info
+    "/student-guide", "/resident-guide", "/living-guide",
+  ];
+
   const pagesVisited: string[] = [];
 
-  // ── Phase 1: Fetch all pages ─────────────────────────────────────────────────
-
-  interface PageData {
-    url: string;
-    text: string;
-    html: string;
-  }
+  interface PageData { url: string; text: string; html: string; }
   const pages: PageData[] = [];
 
-  try {
-    // 1a. Fetch main page
-    let mainResult: FetchResult;
+  // ── Helper: add page to collection if not already present ──────────────────
+  function addPage(r: FetchResult): void {
+    if (!pagesVisited.includes(r.finalUrl) && r.text.length > 100) {
+      pagesVisited.push(r.finalUrl);
+      pages.push({ url: r.finalUrl, text: r.text, html: r.html });
+      log.info({ url: r.finalUrl, source: r.source, len: r.text.length }, "Page added");
+    }
+  }
+
+  // ── Helper: get raw HTML for link discovery (Jina returns plain text) ───────
+  async function getRawHtml(targetUrl: string): Promise<string | null> {
     try {
-      mainResult = await fetchRobust(url, log);
-    } catch (mainErr) {
-      const rootUrl = `${parsedUrl.protocol}//${parsedUrl.host}/`;
-      if (rootUrl !== url) {
-        log.warn({ url, err: String(mainErr) }, "Main URL failed, trying root domain");
-        try {
-          mainResult = await fetchRobust(rootUrl, log);
-        } catch {
-          res.status(500).json({
-            error: `Unable to access this website through any method. Please check the URL and try again.`,
-          });
-          return;
-        }
-      } else {
-        res.status(500).json({ error: `Unable to access ${url}. Please check the URL and try again.` });
-        return;
+      const res = await fetch(targetUrl, {
+        headers: buildBrowserHeaders(USER_AGENTS[5]),
+        redirect: "follow",
+        signal: AbortSignal.timeout(12000),
+      });
+      if (res.ok) return await res.text();
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  try {
+    // ── Step 1a: Fetch the given URL ─────────────────────────────────────────
+    try {
+      const r = await fetchRobust(url, log);
+      addPage(r);
+    } catch (e) {
+      log.warn({ url, err: String(e) }, "Given URL failed");
+    }
+
+    // ── Step 1b: Always fetch the root domain (site-wide navigation lives here)
+    if (rootUrl !== url && !pagesVisited.includes(rootUrl)) {
+      try {
+        const r = await fetchRobust(rootUrl, log);
+        addPage(r);
+      } catch (e) {
+        log.warn({ rootUrl, err: String(e) }, "Root domain fetch failed");
       }
     }
 
-    pagesVisited.push(mainResult.finalUrl);
-    pages.push({ url: mainResult.finalUrl, text: mainResult.text, html: mainResult.html });
-    log.info({ url: mainResult.finalUrl, len: mainResult.text.length }, "Main page fetched");
-
-    // 1b. Discover ALL internal links from the main page HTML
-    // Re-fetch raw HTML for link discovery (Jina returns text, not HTML)
-    let htmlForLinks = mainResult.html;
-    if (mainResult.source === "jina") {
-      // Try to get actual HTML for link discovery
-      try {
-        const directRes = await fetch(url, {
-          headers: buildBrowserHeaders(USER_AGENTS[5]),
-          redirect: "follow",
-          signal: AbortSignal.timeout(15000),
-        });
-        if (directRes.ok) htmlForLinks = await directRes.text();
-      } catch { /* use text content for link extraction */ }
+    // If we got nothing at all, bail out
+    if (pages.length === 0) {
+      res.status(500).json({ error: "Unable to access this website. Please check the URL and try again." });
+      return;
     }
 
-    const internalLinks = findAllInternalLinks(htmlForLinks, mainResult.finalUrl, 20);
-    log.info({ count: internalLinks.length, links: internalLinks }, "Discovered internal links");
+    // ── Step 1c: Collect raw HTML from fetched pages for link discovery ────────
+    const htmlSources: Array<{ html: string; base: string }> = [];
 
-    // 1c. Fetch all internal links in parallel (max 15)
+    for (const page of pages) {
+      // For Jina-fetched pages, also get raw HTML for link extraction
+      const rawHtml = page.html.includes("<a ") ? page.html : await getRawHtml(page.url);
+      if (rawHtml) htmlSources.push({ html: rawHtml, base: page.url });
+    }
+
+    // ── Step 1d: Build a prioritised fetch list ───────────────────────────────
+    // Priority order:
+    //   1. Probed policy paths (highest priority — always attempt these first)
+    //   2. Policy/FAQ/terms links discovered from page HTML
+    //   3. Other internal links discovered from page HTML
+
+    const probedUrls: string[] = [];
+    for (const path of PROBE_PATHS) {
+      try {
+        const probeUrl = new URL(path, rootUrl).href;
+        if (!pagesVisited.includes(probeUrl)) probedUrls.push(probeUrl);
+      } catch { /* skip */ }
+    }
+
+    const htmlDiscoveredLinks: string[] = [];
+    for (const { html, base } of htmlSources) {
+      for (const link of findAllInternalLinks(html, base, 30)) {
+        if (!pagesVisited.includes(link) && !probedUrls.includes(link)) {
+          htmlDiscoveredLinks.push(link);
+        }
+      }
+    }
+
+    // Deduplicate while preserving priority order
+    const seen = new Set<string>();
+    const orderedFetchList: string[] = [];
+    for (const u of [...probedUrls, ...htmlDiscoveredLinks]) {
+      if (!seen.has(u) && !pagesVisited.includes(u)) {
+        seen.add(u);
+        orderedFetchList.push(u);
+      }
+    }
+
+    log.info({ probed: probedUrls.length, discovered: htmlDiscoveredLinks.length, total: orderedFetchList.length }, "Prioritised fetch list built");
+
+    // ── Step 1e: Fetch top 25 candidates in parallel ──────────────────────────
+    const toFetch = orderedFetchList.slice(0, 25);
+
     const subResults = await Promise.allSettled(
-      internalLinks
-        .filter((l) => !pagesVisited.includes(l))
-        .slice(0, 15)
-        .map(async (link) => {
-          try {
-            const r = await fetchRobust(link, log);
-            if (r.text.length > 150) {
-              return { url: r.finalUrl, text: r.text, html: r.html };
-            }
-            return null;
-          } catch (e) {
-            log.warn({ link, err: String(e) }, "Sub-page fetch failed");
-            return null;
-          }
-        })
+      toFetch.map(async (link) => {
+        try {
+          const r = await fetchRobust(link, log);
+          return r;
+        } catch (e) {
+          log.warn({ link, err: String(e) }, "Sub-page fetch failed");
+          return null;
+        }
+      })
     );
 
     for (const r of subResults) {
-      if (r.status === "fulfilled" && r.value) {
-        if (!pagesVisited.includes(r.value.url)) {
-          pagesVisited.push(r.value.url);
-          pages.push(r.value);
-          log.info({ url: r.value.url, len: r.value.text.length }, "Sub-page fetched");
-        }
-      }
+      if (r.status === "fulfilled" && r.value) addPage(r.value);
     }
 
-    log.info({ totalPages: pages.length }, "All pages collected");
+    log.info({ totalPages: pages.length, urls: pagesVisited }, "All pages collected");
   } catch (err) {
     log.error({ err, url }, "Page collection failed unexpectedly");
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to fetch pages" });
@@ -696,11 +761,30 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
   // Each page is filtered to only include paragraphs containing policy keywords.
   // This dramatically reduces content size and keeps extraction within 1 Gemini call.
 
-  const pageSegments: string[] = [];
-  for (const page of pages) {
+  // Score and rank pages so the most policy-rich pages get their full allocation
+  // before the combined character budget runs out.
+  const scoredPages = pages.map((page) => {
     const relevant = extractRelevantText(page.text, MAX_CHARS_PER_PAGE);
-    if (relevant.trim().length > 50) {
+    const score = relevant.split(/\n{2,}/).reduce((sum, p) => sum + scoreParagraph(p), 0);
+    return { page, relevant, score };
+  });
+
+  // Primary pages user gave us always appear first even if lower score
+  const primaryUrl = pages[0]?.url ?? "";
+  scoredPages.sort((a, b) => {
+    if (a.page.url === primaryUrl) return -1;
+    if (b.page.url === primaryUrl) return 1;
+    return b.score - a.score;
+  });
+
+  const pageSegments: string[] = [];
+  for (const { page, relevant } of scoredPages) {
+    // Only include pages with substantial policy content — filters out 404 pages
+    // and pages where only nav/footer mentions a policy keyword
+    if (relevant.trim().length >= MIN_PAGE_POLICY_CHARS) {
       pageSegments.push(`=== SOURCE: ${page.url} ===\n${relevant}`);
+    } else {
+      log.debug({ url: page.url, chars: relevant.trim().length }, "Page excluded — insufficient policy content");
     }
   }
 
