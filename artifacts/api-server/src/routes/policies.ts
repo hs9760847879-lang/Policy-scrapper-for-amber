@@ -616,20 +616,6 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
 
   const rootUrl = `${parsedUrl.protocol}//${parsedUrl.host}/`;
 
-  // Common policy-relevant paths to probe on every site regardless of starting URL
-  const PROBE_PATHS = [
-    "/faq", "/faqs", "/faq/", "/faqs/",
-    "/terms", "/terms-and-conditions", "/terms-conditions", "/terms/",
-    "/cancellation-policy", "/cancellation", "/cancel",
-    "/payment-policy", "/payment", "/payments",
-    "/booking-policy", "/how-to-book", "/book-now",
-    "/policies", "/legal", "/help", "/support",
-    "/booking-terms", "/tenancy-terms", "/resident-terms",
-    "/deposit", "/deposits", "/fees",
-    "/privacy-policy",  // often has booking/payment info
-    "/student-guide", "/resident-guide", "/living-guide",
-  ];
-
   const pagesVisited: string[] = [];
 
   interface PageData { url: string; text: string; html: string; }
@@ -666,8 +652,10 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
       log.warn({ url, err: String(e) }, "Given URL failed");
     }
 
-    // ── Step 1b: Always fetch the root domain (site-wide navigation lives here)
-    if (rootUrl !== url && !pagesVisited.includes(rootUrl)) {
+    // ── Step 1b: Always also fetch the root domain.
+    // The homepage contains the site-wide navigation (FAQs, T&Cs, policies)
+    // even when the user submits a deep property/room URL.
+    if (rootUrl !== url && !pagesVisited.some(p => p === rootUrl || p === rootUrl.slice(0, -1))) {
       try {
         const r = await fetchRobust(rootUrl, log);
         addPage(r);
@@ -682,51 +670,32 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
       return;
     }
 
-    // ── Step 1c: Collect raw HTML from fetched pages for link discovery ────────
+    // ── Step 1c: Extract real links from all fetched pages ─────────────────────
+    // We get raw HTML (not Jina text) because Jina strips <a> tags.
+    // Links are collected from BOTH the given page AND the homepage —
+    // the homepage nav reliably contains FAQs, T&Cs, and policy links.
     const htmlSources: Array<{ html: string; base: string }> = [];
 
     for (const page of pages) {
-      // For Jina-fetched pages, also get raw HTML for link extraction
       const rawHtml = page.html.includes("<a ") ? page.html : await getRawHtml(page.url);
       if (rawHtml) htmlSources.push({ html: rawHtml, base: page.url });
     }
 
-    // ── Step 1d: Build a prioritised fetch list ───────────────────────────────
-    // Priority order:
-    //   1. Probed policy paths (highest priority — always attempt these first)
-    //   2. Policy/FAQ/terms links discovered from page HTML
-    //   3. Other internal links discovered from page HTML
-
-    const probedUrls: string[] = [];
-    for (const path of PROBE_PATHS) {
-      try {
-        const probeUrl = new URL(path, rootUrl).href;
-        if (!pagesVisited.includes(probeUrl)) probedUrls.push(probeUrl);
-      } catch { /* skip */ }
-    }
-
-    const htmlDiscoveredLinks: string[] = [];
+    // Discover real links found on the site (no guessing)
+    const seen = new Set<string>(pagesVisited);
+    const orderedFetchList: string[] = [];
     for (const { html, base } of htmlSources) {
       for (const link of findAllInternalLinks(html, base, 30)) {
-        if (!pagesVisited.includes(link) && !probedUrls.includes(link)) {
-          htmlDiscoveredLinks.push(link);
+        if (!seen.has(link)) {
+          seen.add(link);
+          orderedFetchList.push(link);
         }
       }
     }
 
-    // Deduplicate while preserving priority order
-    const seen = new Set<string>();
-    const orderedFetchList: string[] = [];
-    for (const u of [...probedUrls, ...htmlDiscoveredLinks]) {
-      if (!seen.has(u) && !pagesVisited.includes(u)) {
-        seen.add(u);
-        orderedFetchList.push(u);
-      }
-    }
+    log.info({ discovered: orderedFetchList.length }, "Real links discovered from site HTML");
 
-    log.info({ probed: probedUrls.length, discovered: htmlDiscoveredLinks.length, total: orderedFetchList.length }, "Prioritised fetch list built");
-
-    // ── Step 1e: Fetch top 25 candidates in parallel ──────────────────────────
+    // ── Step 1d: Fetch top 25 real links in parallel ──────────────────────────
     const toFetch = orderedFetchList.slice(0, 25);
 
     const subResults = await Promise.allSettled(
