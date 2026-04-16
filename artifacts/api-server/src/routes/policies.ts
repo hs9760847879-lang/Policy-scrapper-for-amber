@@ -9,6 +9,10 @@ function getGeminiClients(): GoogleGenerativeAI[] {
   const keys = [
     process.env.GOOGLE_API_KEY,
     process.env.GOOGLE_API_KEY_2,
+    process.env.GOOGLE_API_KEY_3,
+    process.env.GOOGLE_API_KEY_4,
+    process.env.GOOGLE_API_KEY_5,
+    process.env.GOOGLE_API_KEY_6,
   ].filter((k): k is string => typeof k === "string" && k.trim().length > 0);
 
   if (keys.length === 0) throw new Error("No GOOGLE_API_KEY environment variable is set");
@@ -519,7 +523,7 @@ const GEMINI_CALL_TIMEOUT_MS = 45000; // 45 seconds per call — prevents slow m
  * Strategy: for each model, try every key before falling to the next model.
  * This maximises quota across both keys before degrading model quality.
  *
- * Attempt order (2 keys × 3 models = 6 combinations):
+ * Attempt order (6 keys × 3 models = 18 combinations):
  *   key1 + gemini-2.5-flash
  *   key2 + gemini-2.5-flash
  *   key1 + gemini-3-flash-preview
