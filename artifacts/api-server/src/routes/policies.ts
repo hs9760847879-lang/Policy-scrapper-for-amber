@@ -284,15 +284,29 @@ const MAX_COMBINED_CHARS = 42000; // hard cap — keeps usage to 1 Gemini call
 const MAX_CHARS_PER_PAGE = 5000;  // max chars we take from any single page
 
 const POLICY_SCORE_KEYWORDS = [
-  // High-weight terms (cancellation/payment policy vocabulary)
+  // ── Cancellation policy vocabulary ───────────────────────────────────────
   "cancellation", "cancel", "refund", "cooling off", "cooling-off",
-  "no visa", "no place", "no pay", "visa", "deferr", "defer",
-  "early termination", "terminate", "replacement tenant", "booking fee",
-  "security deposit", "damage deposit", "instalment", "installment",
-  "payment plan", "guarantor", "booking deposit", "admin fee",
-  "extenuating", "circumstances", "bereavement", "medical",
-  "delayed arrival", "intake", "university place",
-  // Medium-weight terms
+  "no visa", "no place", "no pay", "visa refusal", "visa refused",
+  "deferr", "defer", "gap year", "postpone",
+  "early termination", "terminate", "leave early", "break clause",
+  "replacement tenant", "tenancy takeover", "subletting",
+  "extenuating", "bereavement", "compassionate grounds", "serious illness",
+  "delayed arrival", "travel restriction", "arrive later",
+  "intake delayed", "semester delayed", "university postponed",
+  "no questions asked", "cancel for any reason", "free cancellation",
+  "course cancelled", "course changed", "course withdrawn",
+  "university place", "exam results", "results day", "A-levels",
+  // ── Payment policy vocabulary ─────────────────────────────────────────────
+  "booking fee", "booking deposit", "reservation fee", "holding deposit",
+  "security deposit", "damage deposit", "damage waiver", "bond",
+  "returnable deposit", "non-refundable",
+  "instalment", "installment", "payment plan", "monthly payment",
+  "quarterly payment", "termly payment", "payment schedule",
+  "guarantor", "uk guarantor", "guarantee your rent",
+  "admin fee", "late payment fee", "room change fee", "cleaning fee",
+  "bank transfer", "credit card", "debit card", "direct debit",
+  "how to pay", "payment method", "accepted payment",
+  // ── General policy terms ──────────────────────────────────────────────────
   "policy", "policies", "terms", "conditions", "clause",
   "deposit", "payment", "fee", "charge", "penalty",
   "tenancy", "agreement", "contract", "booking",
@@ -352,62 +366,78 @@ function splitForFallback(text: string): string[] {
 
 // ─── Gemini Prompt ────────────────────────────────────────────────────────────
 
-const EXTRACTION_PROMPT = `You are extracting policy information from a student accommodation website page chunk.
+const EXTRACTION_PROMPT = `You are a strict text extraction tool. Your ONLY job is to find and copy specific policy text that is physically present in the document below.
 
-CRITICAL RULES — read carefully:
-1. Extract ONLY text that is EXPLICITLY written on this page. Copy the EXACT wording from the source.
-2. Do NOT paraphrase, summarize, rewrite, or add any information not present in this chunk.
-3. Do NOT infer, guess, or assume any policy from general context. Null means not found.
-4. If a policy IS found, include the complete verbatim passage (including all specific amounts, timeframes, percentages, and conditions stated).
-5. Return null for any policy not explicitly mentioned in this chunk.
-6. Return ONLY valid JSON — no markdown, no code blocks, no commentary.
+════════════════════════════════════════════════════════
+ABSOLUTE RULES — violating any of these is a critical error:
+════════════════════════════════════════════════════════
+1. COPY ONLY. You may ONLY copy text that appears word-for-word in the source document. Nothing else.
+2. NEVER INVENT. Do not write, rephrase, summarise, or infer anything. If you did not read it verbatim in the source, do not output it.
+3. NEVER ASSUME. A policy existing on the site is NOT evidence it exists in this document. If it is not explicitly stated here, return null.
+4. NEVER EXAGGERATE. Do not expand, embellish, or add context not present in the exact source text.
+5. WHEN IN DOUBT → null. If you are not 100% certain the text is present verbatim, return null.
+6. null IS THE CORRECT ANSWER when a policy is not found. It is not a failure — it means the site genuinely does not state that policy in this content.
+7. Return ONLY valid JSON. No markdown, no code fences, no explanation text.
 
-Return this exact JSON structure:
+════════════════════════════════════════════════════════
+HOW TO EXTRACT:
+════════════════════════════════════════════════════════
+- Scan the source document below for each policy type.
+- If you find relevant text: copy the EXACT sentences/paragraphs verbatim, including all amounts (£/$), percentages, timeframes, and conditions as written.
+- If the text is long, copy the full relevant section — do NOT truncate or summarise it.
+- If NOT found: return null for that field. Do not guess.
+
+Policy search terms to look for (also look for synonyms listed):
+- coolingOffPeriod → look for: "cooling off", "cooling-off", "14 days", "24 hours to cancel", "cancellation period after signing"
+- noVisaNoPay → look for: "visa", "unable to obtain a visa", "visa refusal", "visa refused"
+- noPlaceNoPay → look for: "grades", "university place", "offer withdrawn", "results day", "A-levels", "exam results"
+- universityCourseModification → look for: "course cancelled", "course changed", "course withdrawn", "module cancelled"
+- earlyTermination → look for: "early termination", "leave early", "end your tenancy early", "break clause", "exit early"
+- delayedArrivals → look for: "delayed arrival", "travel restrictions", "late arrival", "arrive later"
+- replacementTenant → look for: "replacement tenant", "tenancy takeover", "find someone", "subletting", "assign your tenancy"
+- deferringStudies → look for: "deferring", "defer your studies", "gap year", "postpone"
+- universityIntakeDelayed → look for: "intake delayed", "semester delayed", "university postponed", "start date delayed"
+- noQuestionsAsked → look for: "no questions asked", "unconditional", "cancel for any reason", "free cancellation"
+- extenuatingCircumstances → look for: "extenuating circumstances", "medical grounds", "bereavement", "compassionate grounds", "serious illness"
+- bookingDeposit → look for: "booking fee", "booking deposit", "reservation fee", "advance payment", "holding deposit"
+- securityDeposit → look for: "security deposit", "damage deposit", "bond", "damage waiver", "returnable deposit"
+- paymentInstalmentPlan → look for: "instalment", "installment", "payment plan", "monthly payments", "quarterly", "termly payments"
+- modeOfPayment → look for: "payment method", "bank transfer", "credit card", "debit card", "direct debit", "how to pay"
+- guarantorRequirement → look for: "guarantor", "guarantor required", "UK guarantor", "guarantee your rent"
+- additionalFees → look for: "admin fee", "late payment fee", "additional charges", "room change fee", "cleaning fee", "penalty"
+
+════════════════════════════════════════════════════════
+OUTPUT FORMAT:
+════════════════════════════════════════════════════════
+Return this exact JSON structure — values must be verbatim copied text OR null:
 {
   "cancellationPolicies": {
-    "coolingOffPeriod": "<exact verbatim text from page, or null>",
-    "noVisaNoPay": "<exact verbatim text from page, or null>",
-    "noPlaceNoPay": "<exact verbatim text from page, or null>",
-    "universityCourseModification": "<exact verbatim text from page, or null>",
-    "earlyTermination": "<exact verbatim text from page, or null>",
-    "delayedArrivals": "<exact verbatim text from page, or null>",
-    "replacementTenant": "<exact verbatim text from page, or null>",
-    "deferringStudies": "<exact verbatim text from page, or null>",
-    "universityIntakeDelayed": "<exact verbatim text from page, or null>",
-    "noQuestionsAsked": "<exact verbatim text from page, or null>",
-    "extenuatingCircumstances": "<exact verbatim text from page, or null>",
-    "other": "<exact verbatim text for any other cancellation policy not listed above, or null>"
+    "coolingOffPeriod": null,
+    "noVisaNoPay": null,
+    "noPlaceNoPay": null,
+    "universityCourseModification": null,
+    "earlyTermination": null,
+    "delayedArrivals": null,
+    "replacementTenant": null,
+    "deferringStudies": null,
+    "universityIntakeDelayed": null,
+    "noQuestionsAsked": null,
+    "extenuatingCircumstances": null,
+    "other": null
   },
   "paymentPolicies": {
-    "bookingDeposit": "<exact verbatim text from page, or null>",
-    "securityDeposit": "<exact verbatim text from page, or null>",
-    "paymentInstalmentPlan": "<exact verbatim text from page, or null>",
-    "modeOfPayment": "<exact verbatim text from page, or null>",
-    "guarantorRequirement": "<exact verbatim text from page, or null>",
-    "additionalFees": "<exact verbatim text from page, or null>"
+    "bookingDeposit": null,
+    "securityDeposit": null,
+    "paymentInstalmentPlan": null,
+    "modeOfPayment": null,
+    "guarantorRequirement": null,
+    "additionalFees": null
   }
 }
 
-Policy definitions (use these ONLY to identify which category to assign found text to):
-- coolingOffPeriod: Period after booking/signing where tenant can cancel without penalty
-- noVisaNoPay: Policy if student cannot obtain a visa
-- noPlaceNoPay: Policy if student does not get a university place
-- universityCourseModification: Policy if course is changed/modified/cancelled by the university
-- earlyTermination: Policy for ending tenancy before the contract end date
-- delayedArrivals: Policy for students arriving late or with travel restrictions
-- replacementTenant: Policy about finding or providing a replacement tenant to exit early
-- deferringStudies: Policy for students deferring their university studies
-- universityIntakeDelayed: Policy if university delays its intake/semester start
-- noQuestionsAsked: Unconditional cancellation option within a specific timeframe
-- extenuatingCircumstances: Cancellation for special circumstances (medical, bereavement, etc.)
-- bookingDeposit: Amount and conditions of deposit required at booking
-- securityDeposit: Security/damage deposit details
-- paymentInstalmentPlan: Instalment or installment payment schedule options
-- modeOfPayment: Accepted payment methods
-- guarantorRequirement: Guarantor requirements and criteria
-- additionalFees: Admin fees, late payment fees, or any other extra charges
-
-Page chunk to analyze:
+════════════════════════════════════════════════════════
+SOURCE DOCUMENT TO EXTRACT FROM:
+════════════════════════════════════════════════════════
 `;
 
 // ─── Merge Partial Extractions ────────────────────────────────────────────────
