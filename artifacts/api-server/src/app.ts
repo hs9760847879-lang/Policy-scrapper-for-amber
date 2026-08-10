@@ -1,6 +1,5 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
-import pinoHttp from "pino-http";
 import { rateLimit } from "express-rate-limit";
 import router from "./routes";
 import { logger } from "./lib/logger";
@@ -10,25 +9,19 @@ const app: Express = express();
 // Trust reverse proxy (Render, Vercel, etc.) to get correct client IPs for rate-limiting
 app.set("trust proxy", 1);
 
-app.use(
-  pinoHttp({
-    logger,
-    serializers: {
-      req(req) {
-        return {
-          id: req.id,
-          method: req.method,
-          url: req.url?.split("?")[0],
-        };
-      },
-      res(res) {
-        return {
-          statusCode: res.statusCode,
-        };
-      },
-    },
-  }),
-);
+// Inline request logger using pino (replaces pino-http middleware to avoid ESM/CJS interop issues)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    logger.info({
+      method: req.method,
+      url: req.url?.split("?")[0],
+      status: res.statusCode,
+      ms: Date.now() - start,
+    }, "request");
+  });
+  next();
+});
 
 // CORS configuration - restrict origins if ALLOWED_ORIGINS is set
 const allowedOriginsEnv = process.env.ALLOWED_ORIGINS;

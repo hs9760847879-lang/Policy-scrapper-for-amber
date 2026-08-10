@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import * as cheerio from "cheerio";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ExtractPoliciesBody } from "@workspace/api-zod";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
@@ -814,7 +815,7 @@ router.post("/extract-policies", async (req, res): Promise<void> => {
     return;
   }
 
-  const log: ReqLog = req.log;
+  const log: ReqLog = logger;
   log.info({ url }, "Starting policy extraction");
 
   const rootUrl = `${parsedUrl.protocol}//${parsedUrl.host}/`;
