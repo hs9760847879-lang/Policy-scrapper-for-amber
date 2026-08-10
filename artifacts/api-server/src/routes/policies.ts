@@ -13,6 +13,7 @@ function getGeminiClients(): GoogleGenerativeAI[] {
     process.env.GOOGLE_API_KEY_4,
     process.env.GOOGLE_API_KEY_5,
     process.env.GOOGLE_API_KEY_6,
+    process.env.GOOGLE_API_KEY_7,
   ].filter((k): k is string => typeof k === "string" && k.trim().length > 0);
 
   if (keys.length === 0)
@@ -675,7 +676,7 @@ function mergeExtractions(results: ExtractedPolicies[]): ExtractedPolicies {
 }
 
 // ─── Gemini extraction ─────
-��──────────────────────────────────────────────────
+// ──────────────────────────────────────────────────
 
 // Models in priority order — best first, confirmed stable
 const MODEL_PRIORITY = [
@@ -691,7 +692,7 @@ const GEMINI_CALL_TIMEOUT_MS = 45000; // 45 seconds per call — prevents slow m
  * Strategy: for each model, try every key before falling to the next model.
  * This maximises quota across both keys before degrading model quality.
  *
- * Attempt order (6 keys × 3 models = 18 combinations):
+ * Attempt order (7 keys × 3 models = 21 combinations):
  *   key1 + gemini-2.5-flash
  *   key2 + gemini-2.5-flash
  *   key1 + gemini-3-flash-preview
