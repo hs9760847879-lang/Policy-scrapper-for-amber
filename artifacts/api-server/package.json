@@ -18,6 +18,7 @@
     "cors": "^2",
     "drizzle-orm": "catalog:",
     "express": "^5",
+    "express-rate-limit": "^8.6.2",
     "node-html-parser": "^7.1.0",
     "pino": "^9",
     "pino-http": "^10"

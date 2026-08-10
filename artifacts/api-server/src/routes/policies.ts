@@ -70,6 +70,7 @@ type ReqLog = {
   info(obj: object, msg: string): void;
   warn(obj: object, msg: string): void;
   error(obj: object, msg: string): void;
+  debug(obj: object, msg: string): void;
 };
 
 interface FetchResult {
@@ -341,7 +342,7 @@ function findAllInternalLinks(
   const medPriority = new Set<string>();
   const lowPriority = new Set<string>();
 
-  $("a[href]").each((_: number, el: cheerio.Element) => {
+  $("a[href]").each((_: number, el: any) => {
     const href = $(el).attr("href");
     if (
       !href ||

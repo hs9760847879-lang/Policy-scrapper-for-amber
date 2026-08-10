@@ -358,6 +358,13 @@ export async function customFetch<T = unknown>(
     }
   }
 
+  // Attach client token if defined in Vite build environment
+  const meta = import.meta as any;
+  const clientToken = meta.env?.VITE_API_CLIENT_TOKEN;
+  if (clientToken && !headers.has("x-api-client-token")) {
+    headers.set("x-api-client-token", clientToken);
+  }
+
   const requestInfo = { method, url: resolveUrl(input) };
 
   const response = await fetch(input, { ...init, method, headers });
